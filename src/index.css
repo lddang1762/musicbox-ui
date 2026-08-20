@@ -1,0 +1,28 @@
+:root {
+  --ink: #20211d;
+  --paper: #f7f7f2;
+  --muted: #74756d;
+  --line: #deded6;
+  --soft: #eeeee8;
+  --lime: #daff48;
+  --lime-soft: #f0f8c9;
+  --coral: #e75b4b;
+  --mono: ui-monospace, Consolas, monospace;
+  font: 16px/1.45 'Trebuchet MS', sans-serif;
+  color: var(--ink);
+  --background: #e9e9e2;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: radial-gradient(circle at 50% -10%, #ffffff 0, var(--background) 52%);
+}
+
+#root { min-height: 100svh; }
+button { font: inherit; -webkit-tap-highlight-color: transparent; }
+.icon { display: block; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+button:focus-visible { outline: 3px solid var(--coral); outline-offset: 3px; }
