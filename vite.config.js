@@ -2,6 +2,17 @@ import { defineConfig } from 'vite'
 import react, { reactCompilerPreset } from '@vitejs/plugin-react'
 import babel from '@rolldown/plugin-babel'
 
+const MOCK_SONGS = [
+  'Twinkle Twinkle Little Star.mid',
+  'Happy Birthday.mid',
+  'Fur Elise.mid',
+  'Canon in D.mid',
+  'Ode to Joy.mid',
+  'Moonlight Sonata.mid',
+  'Greensleeves.mid',
+  'Amazing Grace.mid',
+]
+
 function mockApiPlugin() {
   const state = {
     powerOn: false,
@@ -69,6 +80,8 @@ function mockApiPlugin() {
           state.filename = ''
           state.progress = 0
           send({ ok: true })
+        } else if (path === '/api/songs' && req.method === 'GET') {
+          send({ songs: MOCK_SONGS })
         } else {
           next()
         }
