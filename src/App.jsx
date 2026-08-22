@@ -1,18 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import './App.css'
-
-const MOCK_SONG_LIST = [
-  'Song 1',
-  'Song 2',
-  'Song 3',
-  'Song 4',
-  'Song 5',
-  'Song 6',
-  'Song 7',
-  'Song 8',
-  'Song 9',
-  'Song 10',
-]
+import { useCallback, useEffect, useRef, useState } from "react";
+import "./App.css";
 
 function Icon({ name }) {
   const paths = {
@@ -44,127 +31,195 @@ function Icon({ name }) {
         <circle cx="16" cy="16" r="3" />
       </>
     ),
-  }
+  };
 
   return (
     <svg className="icon" viewBox="0 0 24 24" aria-hidden="true">
       {paths[name]}
     </svg>
-  )
+  );
 }
 
 function App() {
-  const [connectionState, setConnectionState] = useState('loading')
-  const [selectedIndex, setSelectedIndex] = useState(null)
-  const [isPlaying, setIsPlaying] = useState(false)
+  const [connectionState, setConnectionState] = useState("loading");
+  const [selectedIndex, setSelectedIndex] = useState(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  // null = still loading, [] = loaded (possibly empty), [...] = loaded with songs
+  const [songs, setSongs] = useState(null);
 
-  const selectDebounceRef = useRef(null)
+  const selectDebounceRef = useRef(null);
+  const wsRef = useRef(null);
+  const reconnectTimerRef = useRef(null);
 
-  const isConnected = connectionState === 'on'
+  const isConnected = connectionState === "on";
   const isPowering =
-    connectionState === 'powering-on' || connectionState === 'powering-off'
-  const selectedSong = MOCK_SONG_LIST[selectedIndex] ?? null
-  const hasQueuedSong = selectedIndex !== null && selectedSong
+    connectionState === "powering-on" || connectionState === "powering-off";
+  const selectedSong = songs?.[selectedIndex] ?? null;
+  const hasQueuedSong = selectedIndex !== null && selectedSong;
 
-  useEffect(() => {
-    const getStatus = async () => {
-      try {
-        const response = await fetch('/api/status')
-        if (!response.ok) throw new Error('Status request failed')
-        const status = await response.json()
-        setConnectionState(status.powerOn ? 'on' : 'off')
-        if (!status.powerOn) {
-          setIsPlaying(false)
-          setSelectedIndex(null)
-        }
-      } catch (error) {
-        console.error('Failed to get ESP32 status:', error)
-        setConnectionState('off')
-      }
+  // Single source-of-truth for applying any status snapshot (HTTP or WS).
+  // Stable reference — only uses setState functions which never change.
+  const applyStatus = useCallback((status) => {
+    setConnectionState(status.powerOn ? "on" : "off");
+    if (status.powerOn) {
+      setIsPlaying(status.playing ?? false);
+      setSelectedIndex(
+        status.hasSong && status.songIndex >= 0 ? status.songIndex : null
+      );
+    } else {
+      setIsPlaying(false);
+      setSelectedIndex(null);
     }
-    getStatus()
-  }, [])
+  }, []);
+
+  const fetchStatus = useCallback(() => {
+    fetch("/api/status")
+      .then((r) => r.json())
+      .then(applyStatus)
+      .catch(() => {});
+  }, [applyStatus]);
+
+  // WebSocket — real-time push from the ESP32.
+  // Re-syncs via HTTP on every (re)connect to catch any missed events.
+  useEffect(() => {
+    function connect() {
+      const socket = new WebSocket(`ws://${location.host}/ws`);
+      wsRef.current = socket;
+
+      socket.onopen = () => {
+        clearTimeout(reconnectTimerRef.current);
+        // The ESP32 sends current state on connect, but also fetch over HTTP
+        // as a belt-and-suspenders guard against a race on the WS send.
+        fetchStatus();
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          applyStatus(JSON.parse(event.data));
+        } catch {
+          // Malformed frame — ignore and wait for next one.
+        }
+      };
+
+      socket.onclose = () => {
+        reconnectTimerRef.current = setTimeout(connect, 3000);
+      };
+
+      // onerror always fires before onclose, so just let onclose handle retry.
+      socket.onerror = () => {};
+    }
+
+    connect();
+
+    return () => {
+      clearTimeout(reconnectTimerRef.current);
+      const s = wsRef.current;
+      if (s) {
+        s.onclose = null; // prevent reconnect loop on unmount
+        s.close();
+      }
+    };
+  }, [applyStatus, fetchStatus]);
+
+  // Re-sync when the tab becomes visible again after being hidden —
+  // covers the case where the user switched away and missed WS messages.
+  useEffect(() => {
+    function onVisibilityChange() {
+      if (document.visibilityState === "visible") fetchStatus();
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () =>
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [fetchStatus]);
+
+  // Periodic heartbeat: catches any de-sync that WS and visibility didn't.
+  useEffect(() => {
+    const id = setInterval(fetchStatus, 30_000);
+    return () => clearInterval(id);
+  }, [fetchStatus]);
+
+  // Fetch songs once on mount (song list doesn't change at runtime).
+  useEffect(() => {
+    fetch("/api/songs")
+      .then((r) => r.json())
+      .then((data) => setSongs(data.songs ?? []))
+      .catch(() => setSongs([]));
+  }, []);
 
   const powerOn = async () => {
-    if (isPowering || isConnected) return
-    setConnectionState('powering-on')
+    if (isPowering || isConnected) return;
+    setConnectionState("powering-on");
     try {
-      const response = await fetch('/api/power/on', { method: 'POST' })
-      if (!response.ok) throw new Error('Power on request failed')
-      const status = await response.json()
-      setConnectionState(status.powerOn ? 'on' : 'off')
+      const response = await fetch("/api/power/on", { method: "POST" });
+      if (!response.ok) throw new Error("Power on request failed");
+      const status = await response.json();
+      setConnectionState(status.powerOn ? "on" : "off");
     } catch (error) {
-      console.error('Failed to power on:', error)
-      setConnectionState('off')
+      console.error("Failed to power on:", error);
+      setConnectionState("off");
     }
-  }
+  };
 
   const powerOff = async () => {
-    if (isPowering || !isConnected) return
-    setConnectionState('powering-off')
+    if (isPowering || !isConnected) return;
+    setConnectionState("powering-off");
     try {
-      const response = await fetch('/api/power/off', { method: 'POST' })
-      if (!response.ok) throw new Error('Power off request failed')
-      const status = await response.json()
-      setIsPlaying(false)
-      setSelectedIndex(null)
-      setConnectionState(status.powerOn ? 'on' : 'off')
+      const response = await fetch("/api/power/off", { method: "POST" });
+      if (!response.ok) throw new Error("Power off request failed");
+      const status = await response.json();
+      setIsPlaying(false);
+      setSelectedIndex(null);
+      setConnectionState(status.powerOn ? "on" : "off");
     } catch (error) {
-      console.error('Failed to power off:', error)
-      try {
-        const response = await fetch('/api/status')
-        const status = await response.json()
-        setConnectionState(status.powerOn ? 'on' : 'off')
-      } catch {
-        setConnectionState('off')
-      }
+      console.error("Failed to power off:", error);
+      fetchStatus();
     }
-  }
+  };
 
-  const selectSong = (index) => {
-    setSelectedIndex(index)
-    setIsPlaying(true)
+  const selectSong = (index, songName) => {
+    setSelectedIndex(index);
+    setIsPlaying(true);
 
-    clearTimeout(selectDebounceRef.current)
+    clearTimeout(selectDebounceRef.current);
     selectDebounceRef.current = setTimeout(async () => {
       try {
         const params = new URLSearchParams({
           index: String(index),
-          name: MOCK_SONG_LIST[index],
-        })
-        await fetch(`/api/select?${params}`, { method: 'POST' })
+          name: songName,
+        });
+        await fetch(`/api/select?${params}`, { method: "POST" });
       } catch (error) {
-        console.error('Failed to select song:', error)
+        console.error("Failed to select song:", error);
       }
-    }, 1000)
-  }
+    }, 1000);
+  };
 
   const moveToSong = (direction) => {
-    const nextIndex =
-      (selectedIndex + direction + MOCK_SONG_LIST.length) % MOCK_SONG_LIST.length
-    selectSong(nextIndex)
-  }
+    if (!songs || songs.length === 0) return;
+    const nextIndex = (selectedIndex + direction + songs.length) % songs.length;
+    selectSong(nextIndex, songs[nextIndex]);
+  };
 
   const handlePlayPause = async () => {
-    if (!hasQueuedSong) return
-    const newPlaying = !isPlaying
-    setIsPlaying(newPlaying)
+    if (!hasQueuedSong) return;
+    const newPlaying = !isPlaying;
+    setIsPlaying(newPlaying);
     try {
-      await fetch(newPlaying ? '/api/play' : '/api/pause', { method: 'POST' })
+      await fetch(newPlaying ? "/api/play" : "/api/pause", { method: "POST" });
     } catch (error) {
-      console.error('Failed to toggle playback:', error)
+      console.error("Failed to toggle playback:", error);
     }
-  }
+  };
 
   const handleStop = async () => {
-    setIsPlaying(false)
-    setSelectedIndex(null)
+    setIsPlaying(false);
+    setSelectedIndex(null);
     try {
-      await fetch('/api/stop', { method: 'POST' })
+      await fetch("/api/stop", { method: "POST" });
     } catch (error) {
-      console.error('Failed to stop:', error)
+      console.error("Failed to stop:", error);
     }
-  }
+  };
 
   const topbar = (
     <header className="topbar">
@@ -176,14 +231,14 @@ function App() {
         <h1>Musicbox</h1>
       </div>
       <span className="connection-status">
-        <span className={isConnected ? 'connected' : ''} />
-        {connectionState === 'loading'
-          ? 'connecting...'
+        <span className={isConnected ? "connected" : ""} />
+        {connectionState === "loading"
+          ? "connecting..."
           : isConnected
-            ? 'ready'
+            ? "ready"
             : isPowering
-              ? 'powering...'
-              : 'offline'}
+              ? "powering..."
+              : "offline"}
       </span>
       {isConnected && (
         <button
@@ -198,34 +253,34 @@ function App() {
         </button>
       )}
     </header>
-  )
+  );
 
   if (!isConnected) {
     return (
       <main className="player-shell power-shell">
         {topbar}
-        <section className={`power-panel ${isPowering ? 'is-powering' : ''}`}>
+        <section className={`power-panel ${isPowering ? "is-powering" : ""}`}>
           <button
             type="button"
             className="power-button"
-            aria-label={isPowering ? 'Powering on' : 'Power on'}
-            disabled={isPowering || connectionState === 'loading'}
+            aria-label={isPowering ? "Powering on" : "Power on"}
+            disabled={isPowering || connectionState === "loading"}
             onClick={powerOn}
           >
             <Icon name="power" />
           </button>
           <p className="power-label">
-            {connectionState === 'loading'
-              ? 'Connecting...'
+            {connectionState === "loading"
+              ? "Connecting..."
               : isPowering
-                ? connectionState === 'powering-off'
-                  ? 'Powering off'
-                  : 'Powering on'
-                : 'Tap to power on'}
+                ? connectionState === "powering-off"
+                  ? "Powering off"
+                  : "Powering on"
+                : "Tap to power on"}
           </p>
         </section>
       </main>
-    )
+    );
   }
 
   return (
@@ -237,12 +292,16 @@ function App() {
         </div>
         <div className="track-meta">
           <p className="eyebrow">
-            {hasQueuedSong ? (isPlaying ? 'NOW PLAYING' : 'PAUSED') : 'SELECT A SONG'}
+            {hasQueuedSong
+              ? isPlaying
+                ? "NOW PLAYING"
+                : "PAUSED"
+              : "SELECT A SONG"}
           </p>
           <h2 id="now-playing-title">{selectedSong}</h2>
         </div>
         <div
-          className={`equalizer ${isPlaying ? 'is-active' : ''}`}
+          className={`equalizer ${isPlaying ? "is-active" : ""}`}
           aria-hidden="true"
         >
           <i />
@@ -254,28 +313,38 @@ function App() {
       <section className="library" aria-labelledby="library-title">
         <div className="section-heading">
           <h2 id="library-title">Library</h2>
-          <span>{MOCK_SONG_LIST.length} tracks</span>
+          <span>{songs === null ? "—" : songs.length} tracks</span>
         </div>
-        <div className="song-list" role="listbox" aria-label="Song library">
-          {MOCK_SONG_LIST.map((song, index) => (
-            <button
-              className={`song-row ${index === selectedIndex ? 'is-selected' : ''}`}
-              key={song}
-              type="button"
-              role="option"
-              aria-selected={index === selectedIndex}
-              onClick={() => selectSong(index)}
-            >
-              <span className="song-number">
-                {String(index + 1).padStart(2, '0')}
-              </span>
-              <span className="song-name">{song}</span>
-              {index === selectedIndex && (
-                <span className="playing-dot" aria-label="Selected" />
-              )}
-            </button>
-          ))}
-        </div>
+        {songs === null ? (
+          <div
+            className="song-list-spinner"
+            role="status"
+            aria-label="Loading songs"
+          />
+        ) : songs.length === 0 ? (
+          <p className="song-list-empty">No songs found on SD card</p>
+        ) : (
+          <div className="song-list" role="listbox" aria-label="Song library">
+            {songs.map((song, index) => (
+              <button
+                className={`song-row ${index === selectedIndex ? "is-selected" : ""}`}
+                key={song}
+                type="button"
+                role="option"
+                aria-selected={index === selectedIndex}
+                onClick={() => selectSong(index, song)}
+              >
+                <span className="song-number">
+                  {String(index + 1).padStart(2, "0")}
+                </span>
+                <span className="song-name">{song}</span>
+                {index === selectedIndex && (
+                  <span className="playing-dot" aria-label="Selected" />
+                )}
+              </button>
+            ))}
+          </div>
+        )}
       </section>
       <footer className="controls" aria-label="Playback controls">
         <button
@@ -292,11 +361,11 @@ function App() {
           disabled={!isConnected}
           type="button"
           className="control-button control-button--primary"
-          aria-label={isPlaying ? 'Pause' : 'Play'}
-          title={isPlaying ? 'Pause' : 'Play'}
+          aria-label={isPlaying ? "Pause" : "Play"}
+          title={isPlaying ? "Pause" : "Play"}
           onClick={handlePlayPause}
         >
-          <Icon name={isPlaying ? 'pause' : 'play'} />
+          <Icon name={isPlaying ? "pause" : "play"} />
         </button>
         <button
           disabled={!isConnected}
@@ -320,7 +389,7 @@ function App() {
         </button>
       </footer>
     </main>
-  )
+  );
 }
 
-export default App
+export default App;
